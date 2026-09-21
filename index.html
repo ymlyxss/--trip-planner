@@ -336,7 +336,13 @@ input,select,textarea{font-family:inherit;font-size:inherit;color:inherit}
 
 /* ===================== PDF 打印容器 ===================== */
 #print-root{position:fixed;left:-12000px;top:0;width:794px;background:#fff;z-index:-1}
-.pdf-doc{width:794px;background:#fff;color:#0f172a;padding:34px 40px 40px;
+#pdf-mask{position:fixed;inset:0;z-index:9000;background:#fff;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;
+  font-size:14px;color:#0f172a}
+#pdf-mask .spin{width:26px;height:26px;border:3px solid #e2e8f0;border-top-color:#0284c7;
+  border-radius:50%;animation:pdfspin .8s linear infinite}
+@keyframes pdfspin{to{transform:rotate(360deg)}}
+.pdf-doc{width:100%;box-sizing:border-box;background:#fff;color:#0f172a;padding:34px 40px 40px;
   font-family:"PingFang SC","Microsoft YaHei","HarmonyOS Sans SC",sans-serif;font-size:12px;line-height:1.6}
 .pdf-doc *{box-sizing:border-box}
 .pdf-brand{font-size:11px;letter-spacing:2px;color:#0d9488;font-weight:700;margin-bottom:8px}
@@ -437,6 +443,7 @@ input,select,textarea{font-family:inherit;font-size:inherit;color:inherit}
 <div id="modal-root" data-page-node-id="pn23zpV6TAdAjsh1h3wyf9"></div>
 <div id="launch-tip" class="launch-tip hidden"></div>
 <div id="pdf-tip" class="launch-tip hidden"></div>
+<div id="pdf-mask" class="hidden"><div class="spin"></div><div>正在生成 PDF…</div></div>
 <div id="print-root" data-page-node-id="8aOfVFlWaUfjWJjBseaHAm"></div>
 <div id="toast" data-page-node-id="GqFedjd9rhdu0FoDPByHEI"></div>
 
@@ -1548,6 +1555,7 @@ function showPdfTip(){
     '<div class="launch-tip-actions">' +
       '<button class="btn primary" data-action="pdf-save">⬇️ 再下载一次</button>' +
       '<button class="btn" data-action="pdf-open">📖 打开预览</button>' +
+      '<button class="btn" data-action="pdf-print">🖨️ 打印另存</button>' +
       '<button class="btn" data-action="pdf-tip-close">关闭</button>' +
     '</div>';
   box.classList.remove('hidden');
@@ -1561,44 +1569,71 @@ async function exportPDF(tripId){
   const t = getTrip(tripId || view.tripId);
   if(!t){ toast('没有可导出的行程'); return; }
   const root = $('#print-root');
+  const mask = document.getElementById('pdf-mask');
   root.innerHTML = buildPrintHTML(t);
+
+  /* 关键：#print-root 平时是 position:fixed;left:-12000px（离屏）。
+     html2pdf 克隆节点时会原样保留这个定位，截图区里什么都拍不到 → PDF 全白。
+     所以生成期间把它放回普通文档流，并用白色遮罩挡住，结束后还原。 */
+  const restoreCss = root.getAttribute('style') || '';
+  root.style.cssText = 'position:static!important;left:auto!important;top:auto!important;' +
+                       'width:auto!important;background:#fff;z-index:auto!important;';
+  if(mask) mask.classList.remove('hidden');
   toast('正在生成 PDF…');
-  const ok = await ensurePdfLib();
-  if(!ok){
-    toast('导出组件需要联网加载，已改用打印');
-    const box = document.getElementById('pdf-tip');
-    if(box){
-      box.innerHTML =
-        '<h4>⚠️ 没能直接生成 PDF</h4>' +
-        '<p>首次导出要联网加载组件。已帮你打开打印窗口，在里面选「目标打印机 → 另存为 PDF」即可保存。<br>' +
-        '也可以连上网络后回到这里再点一次「导出 PDF」。</p>' +
-        '<div class="launch-tip-actions">' +
-          '<button class="btn primary" data-action="pdf-print">🖨️ 用打印另存为 PDF</button>' +
-          '<button class="btn" data-action="pdf-tip-close">关闭</button>' +
-        '</div>';
-      box.classList.remove('hidden');
-    }
-    setTimeout(() => window.print(), 320);
-    return;
-  }
+
+  const cleanup = () => {
+    if(restoreCss) root.setAttribute('style', restoreCss); else root.removeAttribute('style');
+    if(mask) mask.classList.add('hidden');
+  };
+
   try {
+    const ok = await ensurePdfLib();
+    if(!ok){
+      cleanup();
+      showPdfFailTip('导出组件需要联网加载（第一次导出要联网），已改用打印。');
+      setTimeout(() => window.print(), 320);
+      return;
+    }
     const name = `行程规划-${t.title}-${todayStr()}.pdf`;
     const blob = await window.html2pdf().set({
       margin: [10, 8, 10, 8],
       image: { type:'jpeg', quality:0.98 },
-      html2canvas: { scale:2, useCORS:true, backgroundColor:'#ffffff', windowWidth:794 },
+      html2canvas: { scale:2, useCORS:true, backgroundColor:'#ffffff', scrollX:0, scrollY:0 },
       jsPDF: { unit:'mm', format:'a4', orientation:'portrait' },
       pagebreak: { mode:['avoid-all','css'] }
     }).from(root).outputPdf('blob');
+    cleanup();
+
+    /* 一张有文字的行程 PDF 至少十几 KB；几 KB 基本就是白页 */
+    if(!blob || blob.size < 4096){
+      console.warn('PDF 体积异常，疑似空白页', blob && blob.size);
+      showPdfFailTip('生成出来的文件是空的，可能是浏览器截图受限。请用下面的「打印另存为 PDF」，这个一定有效。');
+      setTimeout(() => window.print(), 320);
+      return;
+    }
     if(lastPdf.url){ try { URL.revokeObjectURL(lastPdf.url); } catch(e){} }
     lastPdf = { url: URL.createObjectURL(blob), blob, name, size: blob.size || 0 };
     pdfDownload();
     showPdfTip();
   } catch(e){
+    cleanup();
     console.warn('生成 PDF 失败，回退打印', e);
-    toast('生成失败，已打开打印窗口');
+    showPdfFailTip('生成失败，已改用打印。在打印窗口里选「另存为 PDF」即可。');
     setTimeout(() => window.print(), 320);
   }
+}
+
+function showPdfFailTip(msg){
+  const box = document.getElementById('pdf-tip');
+  if(!box) return;
+  box.innerHTML =
+    '<h4>⚠️ PDF 没能直接生成</h4>' +
+    '<p>' + esc(msg) + '<br>打印窗口里选「目标打印机 → 另存为 PDF」就能拿到文件。</p>' +
+    '<div class="launch-tip-actions">' +
+      '<button class="btn primary" data-action="pdf-print">🖨️ 用打印另存为 PDF</button>' +
+      '<button class="btn" data-action="pdf-tip-close">关闭</button>' +
+    '</div>';
+  box.classList.remove('hidden');
 }
 
 /* ==================== 高德地图 ====================
