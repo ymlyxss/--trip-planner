@@ -436,6 +436,7 @@ input,select,textarea{font-family:inherit;font-size:inherit;color:inherit}
 <div id="app" data-page-node-id="7N1bwBQaGhlPHDErMjVv0D"></div>
 <div id="modal-root" data-page-node-id="pn23zpV6TAdAjsh1h3wyf9"></div>
 <div id="launch-tip" class="launch-tip hidden"></div>
+<div id="pdf-tip" class="launch-tip hidden"></div>
 <div id="print-root" data-page-node-id="8aOfVFlWaUfjWJjBseaHAm"></div>
 <div id="toast" data-page-node-id="GqFedjd9rhdu0FoDPByHEI"></div>
 
@@ -1516,6 +1517,46 @@ async function ensurePdfLib(){
   }
   return false;
 }
+let lastPdf = { url:null, blob:null, name:'', size:0 };
+
+/* 真·下载：走 <a download>，并保留 blob 供「打开预览 / 再下载」复用 */
+function pdfDownload(){
+  if(!lastPdf.url){ toast('请先点「导出 PDF」'); return; }
+  const a = document.createElement('a');
+  a.href = lastPdf.url;
+  a.download = lastPdf.name || '行程规划.pdf';
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => a.remove(), 0);
+  toast('已下载：' + (lastPdf.name || '行程规划.pdf'));
+}
+
+function pdfSizeText(){
+  const n = lastPdf.size || 0;
+  return n > 1024 * 1024 ? (n / 1024 / 1024).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB';
+}
+
+function showPdfTip(){
+  const box = document.getElementById('pdf-tip');
+  if(!box) return;
+  box.innerHTML =
+    '<h4>📄 PDF 已生成</h4>' +
+    '<p>' + esc(lastPdf.name) + ' · ' + pdfSizeText() + '<br>' +
+    '如果没看到下载提示：点「打开预览」在新页面看，再用浏览器的分享／菜单存到手机（iPhone 是「分享 → 存储到文件」）。' +
+    '要是从桌面图标打开没反应，请改用手机浏览器打开本页再导出。</p>' +
+    '<div class="launch-tip-actions">' +
+      '<button class="btn primary" data-action="pdf-save">⬇️ 再下载一次</button>' +
+      '<button class="btn" data-action="pdf-open">📖 打开预览</button>' +
+      '<button class="btn" data-action="pdf-tip-close">关闭</button>' +
+    '</div>';
+  box.classList.remove('hidden');
+}
+function hidePdfTip(){
+  const box = document.getElementById('pdf-tip');
+  if(box){ box.classList.add('hidden'); box.innerHTML = ''; }
+}
+
 async function exportPDF(tripId){
   const t = getTrip(tripId || view.tripId);
   if(!t){ toast('没有可导出的行程'); return; }
@@ -1523,24 +1564,41 @@ async function exportPDF(tripId){
   root.innerHTML = buildPrintHTML(t);
   toast('正在生成 PDF…');
   const ok = await ensurePdfLib();
-  if(ok){
-    try {
-      await window.html2pdf().set({
-        margin: [10, 8, 10, 8],
-        filename: `行程规划-${t.title}-${todayStr()}.pdf`,
-        image: { type:'jpeg', quality:0.98 },
-        html2canvas: { scale:2, useCORS:true, backgroundColor:'#ffffff', windowWidth:794 },
-        jsPDF: { unit:'mm', format:'a4', orientation:'portrait' },
-        pagebreak: { mode:['avoid-all','css'] }
-      }).from(root).save();
-      toast('PDF 已下载');
-      return;
-    } catch(e){
-      console.warn('html2pdf 失败，回退打印', e);
+  if(!ok){
+    toast('导出组件需要联网加载，已改用打印');
+    const box = document.getElementById('pdf-tip');
+    if(box){
+      box.innerHTML =
+        '<h4>⚠️ 没能直接生成 PDF</h4>' +
+        '<p>首次导出要联网加载组件。已帮你打开打印窗口，在里面选「目标打印机 → 另存为 PDF」即可保存。<br>' +
+        '也可以连上网络后回到这里再点一次「导出 PDF」。</p>' +
+        '<div class="launch-tip-actions">' +
+          '<button class="btn primary" data-action="pdf-print">🖨️ 用打印另存为 PDF</button>' +
+          '<button class="btn" data-action="pdf-tip-close">关闭</button>' +
+        '</div>';
+      box.classList.remove('hidden');
     }
+    setTimeout(() => window.print(), 320);
+    return;
   }
-  toast('已打开打印窗口，选择「另存为 PDF」即可');
-  setTimeout(() => window.print(), 320);
+  try {
+    const name = `行程规划-${t.title}-${todayStr()}.pdf`;
+    const blob = await window.html2pdf().set({
+      margin: [10, 8, 10, 8],
+      image: { type:'jpeg', quality:0.98 },
+      html2canvas: { scale:2, useCORS:true, backgroundColor:'#ffffff', windowWidth:794 },
+      jsPDF: { unit:'mm', format:'a4', orientation:'portrait' },
+      pagebreak: { mode:['avoid-all','css'] }
+    }).from(root).outputPdf('blob');
+    if(lastPdf.url){ try { URL.revokeObjectURL(lastPdf.url); } catch(e){} }
+    lastPdf = { url: URL.createObjectURL(blob), blob, name, size: blob.size || 0 };
+    pdfDownload();
+    showPdfTip();
+  } catch(e){
+    console.warn('生成 PDF 失败，回退打印', e);
+    toast('生成失败，已打开打印窗口');
+    setTimeout(() => window.print(), 320);
+  }
 }
 
 /* ==================== 高德地图 ====================
@@ -2630,6 +2688,22 @@ document.addEventListener('click', e => {
     }
     case 'tip-close':
       hideLaunchTip();
+      break;
+
+    /* ===== PDF 结果条 ===== */
+    case 'pdf-save':
+      hidePdfTip();
+      pdfDownload();
+      break;
+    case 'pdf-open':
+      if(lastPdf.url) openUrl(lastPdf.url); else toast('请先生成 PDF');
+      break;
+    case 'pdf-print':
+      hidePdfTip();
+      setTimeout(() => window.print(), 260);
+      break;
+    case 'pdf-tip-close':
+      hidePdfTip();
       break;
 
     /* ===== 高德 ===== */
